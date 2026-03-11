@@ -1,14 +1,18 @@
 #pragma once
+
+#pragma comment(lib, "ws2_32.lib")
+
 #include <winsock2.h>
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <mutex>
+#include <queue>
 
 #include "../DB/DBManager.h"
 
-#pragma comment(lib, "ws2_32.lib")
 
-enum PacketType { LOGIN = 1, STONE = 2, WIN = 3, LEAVE = 4, HEARTBEAT = 5 };
+enum PacketType { LOGIN = 1, STONE = 2, WIN = 3, LEAVE = 4, HEARTBEAT = 5, MATCHING = 6 , SIGNIN = 7};
 
 struct GamePacket
 {
@@ -32,6 +36,15 @@ struct ClientInfo {
 	DWORD lastHeartbeatTime;
 };
 
+struct ClientContext
+{
+	SOCKET socket = INVALID_SOCKET;
+	std::string id;
+	std::queue<GamePacket> packetQueue;
+	std::mutex queueMtx;
+};
+
+
 class ServerManager
 {
 public:
@@ -42,19 +55,31 @@ public:
 
 	void AcceptClients();
 
-	void GameRoomThread(SOCKET player1, SOCKET player2, std::string p1ID, std::string p2ID);
+	void GameRoomThread(std::shared_ptr<ClientContext> p1, std::shared_ptr<ClientContext> p2);
 
 	void MonitorHeartbeats();
 
-	/*	void HeartbeatThread(SOCKET client);*/
+	void GameFinished(std::shared_ptr<ClientContext> winner, std::shared_ptr<ClientContext> loser);
+
+	void MatchMaker();
+
+	void ReceiverThread(std::shared_ptr<ClientContext> ctx);
+
+	bool GetPacket(std::shared_ptr<ClientContext> ctx, GamePacket& packet);
+
+	bool PacketHandle(std::shared_ptr<ClientContext> sender, std::shared_ptr<ClientContext> receiver, GamePacket& packet);
+
 private:
 	SOCKET serverSocket;
 
-	std::vector<std::pair<SOCKET, std::string>> connClients;
 
 	DBManager db;
+
+	std::vector<std::shared_ptr<ClientContext>> connClients;
 
 	std::unordered_map<std::string, DWORD> loginList;
 	std::unordered_map<SOCKET, bool> onGameList;
 	std::unordered_map<std::string, SOCKET> idSocketMap;
+
+	std::unordered_map<SOCKET, SOCKET> matchInfo;
 };

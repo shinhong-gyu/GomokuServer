@@ -12,11 +12,14 @@ public:
 
 	bool ConnectDB(const char* host, const char* user, const char* pw, const char* db, int port);
 
-	bool Login(const std::string& id, const std::string& pw);
+	bool Login(const std::string& id, const std::string& pw,int& error);
 
 	bool UpdateRecord(const std::string& id, bool isWin);
 
 	bool GetRecord(const std::string& id, int& win, int& lose);
+
+	bool SignIn(const std::string& id, const std::string& pw);
+
 private:
 	MYSQL* conn;
 };

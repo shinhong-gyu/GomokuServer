@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <chrono>
 
+std::mutex mtx;
+
 ServerManager::ServerManager()
 {
 	WSADATA wsaData;
@@ -56,14 +58,17 @@ bool ServerManager::StartServer(int port)
 
 	std::cout << "[서버] DB 연결 성공, " << port << "번 포트에서 접속 대기 중..." << "\n";
 
+	std::thread monitorThread(&ServerManager::MonitorHeartbeats, this);
+	std::thread matchingThread(&ServerManager::MatchMaker, this);
+
+	matchingThread.detach();
+	monitorThread.detach();
+
 	return true;
 }
 
 void ServerManager::AcceptClients()
 {
-	std::thread monitorThread(&ServerManager::MonitorHeartbeats, this);
-
-	monitorThread.detach();
 
 	while (true)
 	{
@@ -92,9 +97,10 @@ void ServerManager::AcceptClients()
 					GamePacket response = {};
 					response.type = LOGIN;
 
-					if (loginList[loginID] == 0)
+					if (loginList.find(loginID) == loginList.end())
 					{
-						bool isValid = db.Login(loginID, packet.pw);
+						int denyCode = 0;
+						bool isValid = db.Login(loginID, packet.pw, denyCode);
 
 						if (isValid)
 						{
@@ -103,20 +109,32 @@ void ServerManager::AcceptClients()
 
 							std::cout << "[서버] 새로운 유저가 접속했습니다." << "\n";
 
-							//std::thread hbThread(&ServerManager::HeartbeatThread, this, clientSocket);
+							std::shared_ptr<ClientContext> ctx = std::make_shared<ClientContext>();
+							ctx->socket = clientSocket;
+							ctx->id = loginID;
 
-							//	hbThread.detach();
+							std::thread receiverThread(&ServerManager::ReceiverThread, this, ctx);
+							receiverThread.detach();
 
+							std::lock_guard<std::mutex> lock(mtx);
 
-							connClients.push_back(std::make_pair(clientSocket, loginID));
+							connClients.push_back(ctx);
 							idSocketMap[loginID] = clientSocket;
-							loginList[loginID] = GetTickCount64();
+							loginList[loginID] = (DWORD)GetTickCount64();
 							onGameList[clientSocket] = true;
 						}
 						else
 						{
-							std::cout << "[서버] 로그인 거부: " << packet.id << "\n";
-							response.x = 0;
+							if (denyCode == 1)
+							{
+								std::cout << "[서버] 로그인 거부 (존재하지 않는 아이디): " << packet.id << "\n";
+								response.x = 0;
+							}
+							else if (denyCode == 2)
+							{
+								std::cout << "[서버] 로그인 거부 (비밀번호 불일치): " << packet.id << "\n";
+								response.x = -2;
+							}
 						}
 					}
 					else
@@ -127,124 +145,85 @@ void ServerManager::AcceptClients()
 
 					send(clientSocket, (char*)&response, sizeof(GamePacket), 0);
 				}
-			}
 
-			if (connClients.size() >= 2)
-			{
-				SOCKET p1 = connClients[0].first;
-				SOCKET p2 = connClients[1].first;
-				std::string p1ID = connClients[0].second;
-				std::string p2ID = connClients[1].second;
+				if (packet.type == PacketType::SIGNIN)
+				{
+					std::string signInID(packet.id);
+					std::string signInPW(packet.pw);
 
-				std::cout << "[서버] 2명이 모여 새로운 게임 방을 생성합니다. \n";
+					GamePacket response = {};
 
-				std::thread roomThread(&ServerManager::GameRoomThread, this, p1, p2, p1ID, p2ID);
+					response.type = SIGNIN;
 
-				roomThread.detach();
+					if (db.SignIn(signInID, signInPW))
+					{
+						std::cout << "[서버] 회원가입 성공: " << signInID << "\n";
+						response.x = 1;
+					}
+					else
+					{
+						std::cout << "[서버] 회원가입 실패: " << signInID << "\n";
+						response.x = 0;
+					}
 
-				connClients.erase(connClients.begin());
-				connClients.erase(connClients.begin());
+					send(clientSocket, (char*)&response, sizeof(GamePacket), 0);
+					continue;
+				}
 			}
 		}
 	}
 }
 
-void ServerManager::GameRoomThread(SOCKET player1, SOCKET player2, std::string p1ID, std::string p2ID)
+void ServerManager::GameRoomThread(std::shared_ptr<ClientContext> p1, std::shared_ptr<ClientContext> p2)
 {
 	int black = 1;
 	int white = 2;
 
 	GameInfo p1Info = {};
 	p1Info.color = black;
-	db.GetRecord(p2ID, p1Info.win, p1Info.lose);
+	db.GetRecord(p2->id, p1Info.win, p1Info.lose);
 
-	strncpy_s(p1Info.oppID, sizeof(p1Info.oppID), p2ID.c_str(), _TRUNCATE);
+	strncpy_s(p1Info.oppID, sizeof(p1Info.oppID), p2->id.c_str(), _TRUNCATE);
 	p1Info.oppID[sizeof(p1Info.oppID) - 1] = '\0';
 
 	GameInfo p2Info = {};
 	p2Info.color = white;
-	db.GetRecord(p1ID, p2Info.win, p2Info.lose);
+	db.GetRecord(p1->id, p2Info.win, p2Info.lose);
 
-	strncpy_s(p2Info.oppID, sizeof(p2Info.oppID), p1ID.c_str(), _TRUNCATE);
+	strncpy_s(p2Info.oppID, sizeof(p2Info.oppID), p1->id.c_str(), _TRUNCATE);
 	p2Info.oppID[sizeof(p2Info.oppID) - 1] = '\0';
 
-	send(player1, (char*)&p1Info, sizeof(GameInfo), 0);
-	send(player2, (char*)&p2Info, sizeof(GameInfo), 0);
+	send(p1->socket, (char*)&p1Info, sizeof(GameInfo), 0);
+	send(p2->socket, (char*)&p2Info, sizeof(GameInfo), 0);
 
 	std::cout << "[서버 방] 새로운 게임이 시작되었습니다" << std::endl;
 
 	GamePacket packet;
 
-	int result;
-
 	while (true)
 	{
-		result = recv(player1, (char*)&packet, sizeof(GamePacket), 0);
-
-		if (result <= 0)
+		if (GetPacket(p1, packet))
 		{
-			std::cout << "[서버 방] Player 1 연결 끊김. 게임 종료" << "\n";
-
-			packet.type = PacketType::LEAVE;
-
-			send(player2, (char*)&packet, sizeof(GamePacket), 0);
-
-			break;
+			if (PacketHandle(p1, p2, packet) == false)
+			{
+				break;
+			}
 		}
 
-		loginList[p1ID] = GetTickCount64();
-
-		send(player2, (char*)&packet, sizeof(GamePacket), 0);
-
-		if (packet.type == PacketType::WIN)
+		if (GetPacket(p2, packet))
 		{
-			std::cout << "[서버 방] " + p1ID + " 승리" << "\n";
-
-			loginList[p1ID] = GetTickCount64();
-			loginList[p2ID] = GetTickCount64();
-
-			db.UpdateRecord(p1ID, true);
-			db.UpdateRecord(p2ID, false);
-
-			break;
-		}
-
-		result = recv(player2, (char*)&packet, sizeof(GamePacket), 0);
-
-		loginList[p2ID] = GetTickCount64();
-
-		if (result <= 0)
-		{
-			std::cout << "[서버 방] Player 2 연결 끊김. 게임 종료" << "\n";
-
-			packet.type = PacketType::LEAVE;
-
-			send(player1, (char*)&packet, sizeof(GamePacket), 0);
-
-			break;
-		}
-
-		send(player1, (char*)&packet, sizeof(GamePacket), 0);
-
-		if (packet.type == PacketType::WIN)
-		{
-			std::cout << "[서버 방] " + p2ID + " 승리" << "\n";
-
-			loginList[p1ID] = GetTickCount64();
-			loginList[p2ID] = GetTickCount64();
-
-			db.UpdateRecord(p1ID, false);
-			db.UpdateRecord(p2ID, true);
-
-			break;
+			if (PacketHandle(p2, p1, packet) == false)
+			{
+				break;
+			}
 		}
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
 	}
 
-	onGameList[player1] = false;
-	onGameList[player2] = false;
-
+	onGameList[p1->socket] = false;
+	onGameList[p2->socket] = false;
+	matchInfo.erase(p1->socket);
 	std::cout << "[서버 방] 방 닫음" << "\n";
 }
 
@@ -252,21 +231,20 @@ void ServerManager::MonitorHeartbeats()
 {
 	while (true)
 	{
-		DWORD currentTime = GetTickCount64();
+		DWORD currentTime = (DWORD)GetTickCount64();
 
 		for (auto it = loginList.begin(); it != loginList.end();)
 		{
-
 			if (!onGameList[idSocketMap[it->first]])
 			{
-
-				if (currentTime > it->second && currentTime - it->second > 30000.0f)
+				if (currentTime > it->second && currentTime - it->second > 15000.0f)
 				{
-					std::cout << "\n[서버] 클라이언트 " << it->first << " 연결 끊김 감지" << "\n";
+					std::cout << "[서버 - Monitor] 클라이언트 " << it->first << " 연결 끊김 감지" << "\n";
 
+					std::lock_guard<std::mutex> lock(mtx);
 					for (auto it2 = connClients.begin(); it2 != connClients.end();)
 					{
-						if (it2->first == idSocketMap[it->first])
+						if ((*it2)->socket == idSocketMap[it->first])
 						{
 							it2 = connClients.erase(it2);
 							break;
@@ -285,7 +263,131 @@ void ServerManager::MonitorHeartbeats()
 				}
 			}
 		}
-
 		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 	}
+}
+
+void ServerManager::GameFinished(std::shared_ptr<ClientContext> winner, std::shared_ptr<ClientContext> loser)
+{
+	std::cout << "[서버 방] " + winner->id + " 승리" << "\n";
+
+	loginList[winner->id] = (DWORD)GetTickCount64();
+	loginList[loser->id] = (DWORD)GetTickCount64();
+
+	db.UpdateRecord(loser->id, false);
+	db.UpdateRecord(winner->id, true);
+}
+
+void ServerManager::MatchMaker()
+{
+	while (true)
+	{
+		{
+			std::lock_guard<std::mutex> lock(mtx);
+			if (connClients.size() >= 2)
+			{
+				std::shared_ptr<ClientContext> p1 = connClients[0];
+				std::shared_ptr<ClientContext> p2 = connClients[1];
+
+				std::cout << "[서버] 매칭 성공! 새로운 방 생성\n";
+
+				std::thread roomThread(&ServerManager::GameRoomThread, this, p1, p2);
+				roomThread.detach();
+
+				onGameList[p1->socket] = true;
+				onGameList[p2->socket] = true;
+				matchInfo[p1->socket] = p2->socket;
+
+				connClients.erase(connClients.begin());
+				connClients.erase(connClients.begin());
+			}
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+}
+
+void ServerManager::ReceiverThread(std::shared_ptr<ClientContext> ctx)
+{
+	GamePacket packet;
+
+	while (true)
+	{
+		int result = recv(ctx->socket, (char*)&packet, sizeof(GamePacket), 0);
+
+		{
+			std::lock_guard<std::mutex> lock(mtx);
+			if (result <= 0)
+			{
+				std::cout << "\n[서버 - Recv] 클라이언트 " << ctx->id << " 연결 끊김 감지" << "\n";
+
+				onGameList[ctx->socket] = false;
+
+				if (matchInfo[ctx->socket])
+				{
+					packet.type = PacketType::LEAVE;
+					send(matchInfo[ctx->socket], (char*)&packet, sizeof(GamePacket), 0);
+				}
+
+				break;
+			}
+
+			loginList[ctx->id] = (DWORD)GetTickCount64();
+
+			if (packet.type == PacketType::HEARTBEAT)
+			{
+				continue;
+			}
+
+			if (packet.type == PacketType::MATCHING)
+			{
+				connClients.push_back(ctx);
+				continue;
+			}
+		}
+
+
+		{
+			std::lock_guard<std::mutex> lock(ctx->queueMtx);
+			ctx->packetQueue.push(packet);
+		}
+
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+}
+
+bool ServerManager::GetPacket(std::shared_ptr<ClientContext> ctx, GamePacket& packet)
+{
+	std::lock_guard<std::mutex> lock(ctx->queueMtx);
+
+	if (ctx->packetQueue.empty())
+	{
+		return false;
+	}
+
+	packet = ctx->packetQueue.front();
+	ctx->packetQueue.pop();
+	return true;
+}
+
+bool ServerManager::PacketHandle(std::shared_ptr<ClientContext> sender, std::shared_ptr<ClientContext> receiver, GamePacket& packet)
+{
+	int result = send(receiver->socket, (char*)&packet, sizeof(GamePacket), 0);
+
+	if (result == SOCKET_ERROR)
+	{
+		std::cout << "\n[서버 - Send] 클라이언트 " << receiver->id << " 연결 끊김 감지" << "\n";
+		packet.type = PacketType::LEAVE;
+
+		send(sender->socket, (char*)&packet, sizeof(GamePacket), 0);
+
+		return false;
+	}
+
+	if (packet.type == WIN)
+	{
+		GameFinished(sender, receiver);
+		return false;
+	}
+
+	return true;
 }

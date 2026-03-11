@@ -25,22 +25,43 @@ bool DBManager::ConnectDB(const char* host, const char* user, const char* pw, co
 	return false;
 }
 
-bool DBManager::Login(const std::string& id, const std::string& pw)
+bool DBManager::Login(const std::string& id, const std::string& pw, int& error)
 {
-	std::string query = "select * from users where id = '" + id + "' and password = '" + pw + "'";
+	std::string query = "select password from users where id = '" + id + "'";
 
-	if (mysql_query(conn, query.c_str()) == 0)
+	if (mysql_query(conn, query.c_str()) != 0) 
 	{
-		MYSQL_RES* result = mysql_store_result(conn);
-
-		if (result != NULL && mysql_num_rows(result) == 1)
-		{
-			mysql_free_result(result);
-			return true;
-		}
+		std::cout << "[DB ¿¡·¯] " << mysql_error(conn) << "\n";
+		error = -1;
+		return false;
 	}
 
+
+	MYSQL_RES* result = mysql_store_result(conn);
+
+	if (result == NULL || mysql_num_rows(result) == 0)
+	{
+		if (result)
+		{
+			mysql_free_result(result);
+		}
+		error = 1;
+		return false;
+	}
+
+	MYSQL_ROW row = mysql_fetch_row(result);
+	std::string db_pw = row[0];
+	mysql_free_result(result);
+
+	if (db_pw == pw)
+	{
+		error = 0;
+		return true;
+	}
+
+	error = 2;
 	return false;
+
 }
 
 bool DBManager::UpdateRecord(const std::string& id, bool isWin)
@@ -106,4 +127,16 @@ bool DBManager::GetRecord(const std::string& id, int& win, int& lose)
 
 
 	return true;
+}
+
+bool DBManager::SignIn(const std::string& id, const std::string& pw)
+{
+	std::string query = "insert into users (id, password) values ('" + id + "', '" + pw + "')";
+
+	if (mysql_query(conn, query.c_str()) == 0)
+	{
+		return true;
+	}
+
+	return false;
 }
