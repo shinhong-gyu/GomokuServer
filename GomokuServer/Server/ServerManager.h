@@ -81,5 +81,5 @@ private:
 	std::unordered_map<SOCKET, bool> onGameList;
 	std::unordered_map<std::string, SOCKET> idSocketMap;
 
-	std::unordered_map<SOCKET, SOCKET> matchInfo;
+	std::unordered_map<std::string, std::shared_ptr<ClientContext>> matchInfo;
 };
