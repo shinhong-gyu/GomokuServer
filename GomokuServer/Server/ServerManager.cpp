@@ -5,7 +5,7 @@
 #include <chrono>
 
 std::mutex mtx;
-std::mutex coutMtx;
+std::mutex dbMtx;
 
 ServerManager::ServerManager()
 {
@@ -23,6 +23,16 @@ ServerManager::ServerManager()
 
 ServerManager::~ServerManager()
 {
+	if (monitorThread.joinable())
+	{
+		monitorThread.join();
+	}
+
+	if (matchingThread.joinable())
+	{
+		matchingThread.join();
+	}
+
 	closesocket(serverSocket);
 	WSACleanup();
 }
@@ -57,20 +67,17 @@ bool ServerManager::StartServer(int port)
 		return false;
 	}
 
-	std::lock_guard<std::mutex> lock(coutMtx);
 	std::cout << "[서버] DB 연결 성공, " << port << "번 포트에서 접속 대기 중..." << "\n";
 
-	std::thread monitorThread(&ServerManager::MonitorHeartbeats, this);
-	std::thread matchingThread(&ServerManager::MatchMaker, this);
-
-	matchingThread.detach();
-	monitorThread.detach();
+	monitorThread = std::thread(&ServerManager::MonitorThread, this);
+	matchingThread = std::thread(&ServerManager::MatchMaker, this);
 
 	return true;
 }
 
 void ServerManager::AcceptClients()
 {
+	std::vector<std::thread> clientThreads;
 
 	while (true)
 	{
@@ -102,6 +109,7 @@ void ServerManager::AcceptClients()
 					if (loginList.find(loginID) == loginList.end())
 					{
 						int denyCode = 0;
+						std::lock_guard<std::mutex> lock(dbMtx);
 						bool isValid = db.Login(loginID, packet.pw, denyCode);
 
 						if (isValid)
@@ -115,8 +123,7 @@ void ServerManager::AcceptClients()
 							ctx->socket = clientSocket;
 							ctx->id = loginID;
 
-							std::thread receiverThread(&ServerManager::ReceiverThread, this, ctx);
-							receiverThread.detach();
+							clientThreads.emplace_back(&ServerManager::ReceiverThread, this, ctx);
 
 							std::lock_guard<std::mutex> lock(mtx);
 
@@ -188,6 +195,14 @@ void ServerManager::AcceptClients()
 			}
 		}
 	}
+
+	for (auto& thread : clientThreads)
+	{
+		if (thread.joinable())
+		{
+			thread.join();
+		}
+	}
 }
 
 void ServerManager::GameRoomThread(std::shared_ptr<ClientContext> p1, std::shared_ptr<ClientContext> p2)
@@ -197,14 +212,22 @@ void ServerManager::GameRoomThread(std::shared_ptr<ClientContext> p1, std::share
 
 	GameInfo p1Info = {};
 	p1Info.color = black;
-	db.GetRecord(p2->id, p1Info.win, p1Info.lose);
 
+	{
+		std::lock_guard<std::mutex> lock(dbMtx);
+		db.GetRecord(p2->id, p1Info.win, p1Info.lose);
+	}
+	
 	strncpy_s(p1Info.oppID, sizeof(p1Info.oppID), p2->id.c_str(), _TRUNCATE);
 	p1Info.oppID[sizeof(p1Info.oppID) - 1] = '\0';
 
 	GameInfo p2Info = {};
 	p2Info.color = white;
-	db.GetRecord(p1->id, p2Info.win, p2Info.lose);
+	{
+		std::lock_guard<std::mutex> lock(dbMtx);
+		db.GetRecord(p1->id, p2Info.win, p2Info.lose);
+	}
+	
 
 	strncpy_s(p2Info.oppID, sizeof(p2Info.oppID), p1->id.c_str(), _TRUNCATE);
 	p2Info.oppID[sizeof(p2Info.oppID) - 1] = '\0';
@@ -218,6 +241,11 @@ void ServerManager::GameRoomThread(std::shared_ptr<ClientContext> p1, std::share
 
 	while (true)
 	{
+		if (loginList.find(p1->id) == loginList.end() || loginList.find(p2->id) == loginList.end())
+		{
+			break;
+		}
+
 		if (GetPacket(p1, packet))
 		{
 			if (PacketHandle(p1, p2, packet) == false)
@@ -245,7 +273,7 @@ void ServerManager::GameRoomThread(std::shared_ptr<ClientContext> p1, std::share
 	std::cout << "[서버 방] 방 닫음" << "\n";
 }
 
-void ServerManager::MonitorHeartbeats()
+void ServerManager::MonitorThread()
 {
 	while (true)
 	{
@@ -290,14 +318,16 @@ void ServerManager::MonitorHeartbeats()
 
 void ServerManager::GameFinished(std::shared_ptr<ClientContext> winner, std::shared_ptr<ClientContext> loser)
 {
-	std::lock_guard<std::mutex> lock(coutMtx);
 	std::cout << "[서버 방] " + winner->id + " 승리" << "\n";
 
 	loginList[winner->id] = (DWORD)GetTickCount64();
 	loginList[loser->id] = (DWORD)GetTickCount64();
 
-	db.UpdateRecord(loser->id, false);
-	db.UpdateRecord(winner->id, true);
+	{
+		std::lock_guard<std::mutex> lock(dbMtx);
+		db.UpdateRecord(loser->id, false);
+		db.UpdateRecord(winner->id, true);
+	}
 }
 
 void ServerManager::MatchMaker()

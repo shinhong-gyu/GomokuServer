@@ -12,7 +12,7 @@
 #include "../DB/DBManager.h"
 
 
-enum PacketType { LOGIN = 1, STONE = 2, WIN = 3, LEAVE = 4, HEARTBEAT = 5, MATCHING = 6 , SIGNIN = 7};
+enum PacketType { LOGIN = 1, STONE = 2, WIN = 3, LEAVE = 4, HEARTBEAT = 5, MATCHING = 6, SIGNIN = 7 };
 
 struct GamePacket
 {
@@ -57,7 +57,7 @@ public:
 
 	void GameRoomThread(std::shared_ptr<ClientContext> p1, std::shared_ptr<ClientContext> p2);
 
-	void MonitorHeartbeats();
+	void MonitorThread();
 
 	void GameFinished(std::shared_ptr<ClientContext> winner, std::shared_ptr<ClientContext> loser);
 
@@ -82,4 +82,7 @@ private:
 	std::unordered_map<std::string, SOCKET> idSocketMap;
 
 	std::unordered_map<std::string, std::shared_ptr<ClientContext>> matchInfo;
+
+	std::thread monitorThread;
+	std::thread matchingThread;
 };

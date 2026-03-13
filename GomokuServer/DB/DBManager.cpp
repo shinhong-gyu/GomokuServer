@@ -27,9 +27,9 @@ bool DBManager::ConnectDB(const char* host, const char* user, const char* pw, co
 
 bool DBManager::Login(const std::string& id, const std::string& pw, int& error)
 {
-	std::string query = "select password from users where id = '" + id + "'";
+	std::string query = "select password from accountinfo where id = '" + id + "'";
 
-	if (mysql_query(conn, query.c_str()) != 0) 
+	if (mysql_query(conn, query.c_str()) != 0)
 	{
 		std::cout << "[DB ¿¡·¯] " << mysql_error(conn) << "\n";
 		error = -1;
@@ -70,11 +70,11 @@ bool DBManager::UpdateRecord(const std::string& id, bool isWin)
 
 	if (isWin)
 	{
-		query = "update users set win = win + 1 where id = '" + id + "'";
+		query = "update winloseinfo set win = win + 1 where id = '" + id + "'";
 	}
 	else
 	{
-		query = "update users set lose = lose + 1 where id = '" + id + "'";
+		query = "update winloseinfo set lose = lose + 1 where id = '" + id + "'";
 	}
 
 	if (mysql_query(conn, query.c_str()) == 0)
@@ -89,8 +89,8 @@ bool DBManager::UpdateRecord(const std::string& id, bool isWin)
 
 bool DBManager::GetRecord(const std::string& id, int& win, int& lose)
 {
-	std::string winQurey = "select win from users where id = '" + id + "'";
-	std::string loseQuery = "select lose from users where id = '" + id + "'";
+	std::string winQurey = "select win from winloseinfo where id = '" + id + "'";
+	std::string loseQuery = "select lose from winloseinfo where id = '" + id + "'";
 
 	if (mysql_query(conn, winQurey.c_str()) == 0)
 	{
@@ -108,6 +108,7 @@ bool DBManager::GetRecord(const std::string& id, int& win, int& lose)
 			mysql_free_result(result);
 		}
 	}
+
 	if (mysql_query(conn, loseQuery.c_str()) == 0)
 	{
 		MYSQL_RES* result = mysql_store_result(conn);
@@ -131,12 +132,32 @@ bool DBManager::GetRecord(const std::string& id, int& win, int& lose)
 
 bool DBManager::SignIn(const std::string& id, const std::string& pw)
 {
-	std::string query = "insert into users (id, password) values ('" + id + "', '" + pw + "')";
+	if (mysql_query(conn, "start transaction") != 0)
+	{
+		return false;
+	}
 
-	if (mysql_query(conn, query.c_str()) == 0)
+	std::string query1 = "insert into accountinfo (id, password) values ('" + id + "', '" + pw + "')";
+
+	if (mysql_query(conn, query1.c_str()) != 0)
+	{
+		mysql_query(conn, "rollback"); 
+		return false;
+	}
+
+	std::string query2 = "insert into winloseinfo (id, win, lose) values ('" + id + "', 0, 0)";
+
+	if (mysql_query(conn, query2.c_str()) != 0) 
+	{
+		mysql_query(conn, "rollback");
+		return false;
+	}
+
+	if (mysql_query(conn, "commit") == 0)
 	{
 		return true;
 	}
 
+	mysql_query(conn, "rollback");
 	return false;
 }
